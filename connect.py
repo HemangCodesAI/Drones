@@ -4,10 +4,17 @@ from math import sqrt, atan2, degrees
 
 telemetry_port = 'COM10'
 baud_rate = 57600
-
-# Constants for follow mode
 FOLLOW_DISTANCE = 10  # Desired follow distance in meters
 KP = 0.5  # Proportional gain for velocity control
+
+
+def request_message(master, message_id: int):
+    master.mav.command_long_send(
+        master.target_system,
+        master.target_component,
+        mavutil.mavlink.MAV_CMD_REQUEST_MESSAGE,
+        0, # confirmation
+        message_id, 0, 0, 0, 0, 0, 0)
 
 def scan_for_drones(connection, timeout=10):
     print("Scanning for drones...")
@@ -29,7 +36,7 @@ def scan_for_drones(connection, timeout=10):
 
     return detected_drones
 
-def connect_to_drone():
+def connect_to_drone(telemetry_port, baud_rate=57600):
     print(f"Connecting to drone on {telemetry_port} at {baud_rate} baud...")
     connection = mavutil.mavlink_connection(telemetry_port, baud=baud_rate)
     print("Waiting for heartbeat...")
@@ -37,26 +44,10 @@ def connect_to_drone():
     print("Heartbeat received! Connected to the drone.")
     return connection
 
-def get_global_position(connection):
-    msg = connection.recv_match(type='GLOBAL_POSITION_INT', blocking=True, timeout=5)
-    if msg:
-        lat = msg.lat / 1e7
-        lon = msg.lon / 1e7
-        alt = msg.alt / 1000.0
-        return lat, lon, alt
-    return None
-
-def get_velocity(connection):
-    msg = connection.recv_match(type='GLOBAL_POSITION_INT', blocking=True, timeout=5)
-    if msg:
-        vx = msg.vx / 100.0  # cm/s to m/s
-        vy = msg.vy / 100.0
-        vz = msg.vz / 100.0
-        return vx, vy, vz
-    return None
-
-def arm_drone(connection):
+def arm_drone(connection,sys_id):
+    
     print("Arming the drone...")
+    connection.target_system=sys_id
     connection.mav.command_long_send(
         connection.target_system,    
         connection.target_component, 
@@ -67,8 +58,9 @@ def arm_drone(connection):
     connection.motors_armed_wait()
     print("Drone is now armed.")
 
-def disarm_drone(connection):
+def disarm_drone(connection,sys_id):
     print("Disarming the drone...")
+    connection.target_system=sys_id
     connection.mav.command_long_send(
         connection.target_system,    
         connection.target_component, 
@@ -78,6 +70,98 @@ def disarm_drone(connection):
     )
     connection.motors_disarmed_wait()
     print("Drone is now disarmed.")
+    return None
+
+def get_global_position(connection):
+    request_message(connection,33)
+    msg = connection.recv_match(type='GLOBAL_POSITION_INT', blocking=True, timeout=5)
+    print(msg)
+    # msg = connection.messages['GLOBAL_POSITION_INT'].alt
+    # print(msg)
+    if msg:
+        lat = msg.lat / 1e7
+        lon = msg.lon / 1e7
+        alt = msg.alt / 1000.0
+        return lat, lon, alt
+    return None
+
+
+def get_battery(connection):
+    request_message(connection,1)
+    msg = connection.recv_match(type='SYS_STATUS', blocking=True, timeout=5)
+    if msg:
+        voltage = msg.voltage_battery / 1000.0  # Convert millivolts to volts
+        # current = msg.current_battery / 100.0   # Convert centiamps to amps
+        # remaining = msg.battery_remaining       # Percentage of battery remaining
+        # print(f"Battery Voltage: {voltage}V, Current: {current}A, Remaining: {remaining}%")
+        return voltage
+    else:
+        print("Failed to receive battery data.")
+        return None
+
+def get_altitude(connection):
+    request_message(connection,33)
+    msg = connection.recv_match(type='GLOBAL_POSITION_INT', blocking=True, timeout=5)
+    if msg:
+        altitude = msg.alt / 1000.0  # Convert from millimeters to meters
+        print(f"Altitude: {altitude} meters")
+        return altitude
+    else:
+        print("Failed to receive altitude data.")
+        return None
+
+def get_throttle(connection):
+    request_message(connection,35)
+    msg = connection.recv_match(type='RC_CHANNELS', blocking=True, timeout=5)
+    if msg:
+        throttle = msg.chan3_raw  # Assuming channel 3 is throttle (common setup)
+        print(f"Throttle: {throttle}")
+        return throttle
+    else:
+        print("Failed to receive throttle data.")
+        return None
+
+def get_rel_altitude(connection):
+    request_message(connection,33)
+    msg = connection.recv_match(type='GLOBAL_POSITION_INT', blocking=True, timeout=5)
+    if msg:
+        rel_altitude = msg.relative_alt / 1000.0  # Convert from millimeters to meters
+        print(f"Relative Altitude: {rel_altitude} meters")
+        return rel_altitude
+    else:
+        print("Failed to receive relative altitude data.")
+        return None
+
+def get_status(connection):
+    request_message(connection,0)
+    msg = connection.recv_match(type='HEARTBEAT', blocking=True, timeout=5)
+    if msg:
+        system_status = mavutil.mavlink.enums['MAV_STATE'][msg.system_status].name
+        print(f"System Status: {system_status}")
+        return system_status
+    else:
+        print("Failed to receive status data.")
+        return None
+
+def get_prearm(connection):
+    request_message(connection,253)
+    msg = connection.recv_match(type='STATUSTEXT', blocking=True, timeout=5)
+    if msg and "PreArm" in msg.text:
+        print(f"PreArm message: {msg.text}")
+        return msg.text
+    else:
+        print("No PreArm status received.")
+        return None
+
+def get_velocity(connection):
+    request_message(connection,33)
+    msg = connection.recv_match(type='GLOBAL_POSITION_INT', blocking=True, timeout=5)
+    if msg:
+        vx = msg.vx / 100.0  # cm/s to m/s
+        vy = msg.vy / 100.0
+        vz = msg.vz / 100.0
+        print(f"Velocity: ({vx}, {vy}, {vz}) m/s")
+        return vx, vy, vz 
 
 def follow_drone(connection, lead_drone_sysid):
     print(f"Following drone with system ID {lead_drone_sysid}...")
@@ -121,11 +205,12 @@ def follow_drone(connection, lead_drone_sysid):
 
         time.sleep(1)  # Adjust as needed
 
+
 def main():
     try:
-        connection = connect_to_drone()
+        connection = connect_to_drone(telemetry_port, baud_rate)
         while True:
-            command = input("Enter a command (get_position, arm, disarm, scan, follow, exit): ").strip().lower()
+            command = input("Enter a command : ").strip().lower()
             parts=command.split()
             if len(parts)==0:
                 continue
@@ -134,8 +219,7 @@ def main():
             if tar_system_id is not None:
                     connection.target_system = tar_system_id
             if command == 'get_position':
-
-                get_global_position(connection)
+                print(get_global_position(connection))
             elif command == 'arm':
                 arm_drone(connection)
             elif command == 'disarm':
@@ -146,6 +230,20 @@ def main():
             elif command == 'follow':
                 lead_drone_id = int(input("Enter the lead drone's system ID: "))
                 follow_drone(connection, lead_drone_id)
+            elif command=="velocity":
+                get_velocity(connection)
+            elif command=="prearm":
+                get_prearm(connection)
+            elif command=="status":
+                get_status(connection)
+            elif command=="throttle":
+                get_throttle(connection)
+            elif command=="alt":
+                get_altitude(connection)
+            elif command=="rel":
+                get_rel_altitude(connection)
+            elif command=="battery":
+                get_battery(connection)
             elif command == 'exit':
                 print("Exiting...")
                 break
